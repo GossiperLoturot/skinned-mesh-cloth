@@ -1,0 +1,30 @@
+#pragma kernel CSMain
+
+#define data_t float
+#define COMPARISON(a, b) (a < b)
+
+int inc;
+int dir;
+RWStructuredBuffer<data_t> data;
+
+[numthreads(64, 1, 1)]
+void CSMain(uint id : SV_DispatchThreadID)
+{
+	int low = id & (inc - 1); // low order bits (below INC)
+	int i = (id << 1) - low; // insert 0 at position INC
+	bool reverse = ((dir & i) == 0); // asc/desc order
+
+	// Load
+	data_t x0 = data[i];
+	data_t x1 = data[inc + i];
+
+	// Sort
+	bool swap = reverse ^ COMPARISON(x0, x1);
+	data_t auxa = x0;
+	data_t auxb = x1;
+	if (swap) { x0 = auxb; x1 = auxa; }
+
+	// Store
+	data[i] = x0;
+	data[inc + i] = x1;
+}

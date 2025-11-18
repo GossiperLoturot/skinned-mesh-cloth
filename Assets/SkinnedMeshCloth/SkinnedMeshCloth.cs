@@ -1,10 +1,12 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
+using UnityEngine.VFX;
 
 public class SkinnedMeshCloth : MonoBehaviour
 {
     public ComputeShader shader;
+    public VisualEffect visualEffect;
 
     private RenderGraph _renderGraph;
     private SkinnedMeshClothPass _pass;
@@ -12,7 +14,7 @@ public class SkinnedMeshCloth : MonoBehaviour
     void OnEnable()
     {
         _renderGraph = new RenderGraph("Skinned Mesh Cloth Graph");
-        _pass = new SkinnedMeshClothPass(shader);
+        _pass = new SkinnedMeshClothPass(shader, visualEffect);
 
         RenderPipelineManager.beginCameraRendering += OnBeginCamera;
     }
@@ -57,54 +59,80 @@ class PassData
     public ComputeShader shader;
 
     public int count;
-    public BufferHandle srcBuffer;
-    public BufferHandle dstBuffer;
+    public BufferHandle idxBuffer;
 }
 
 class SkinnedMeshClothPass : System.IDisposable
 {
     private ComputeShader _shader;
+    private VisualEffect _visualEffect;
 
-    private int _count;
-    private GraphicsBuffer _srcBuffer;
-    private GraphicsBuffer _dstBuffer;
+    private GraphicsBuffer _idxBuffer;
+    private bool _computed;
 
-    public SkinnedMeshClothPass(ComputeShader shader)
+    private int COUNT = 1024;
+    private const int THREADNUM = 64;
+
+    public SkinnedMeshClothPass(ComputeShader shader, VisualEffect visualEffect)
     {
         if (shader == null) throw new System.ArgumentNullException(nameof(shader));
 
         _shader = shader;
+        _visualEffect = visualEffect;
 
-        _count = 256;
-        _srcBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _count, 4);
-        _dstBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _count, 4);
+        _idxBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, COUNT, 4);
+
+        var data = new float[COUNT];
+        for (int i = 0; i < COUNT; i++) data[i] = Random.value;
+        _idxBuffer.SetData(data);
     }
 
     public void RecordRenderGraph(RenderGraph renderGraph)
     {
-        using (var builder = renderGraph.AddComputePass<PassData>("Skinned Mesh Flow Pass", out var passData))
+        if (_computed) return;
+
+        using (var builder = renderGraph.AddComputePass<PassData>("Skinned Mesh Cloth Pass", out var passData))
         {
             passData.shader = _shader;
 
-            passData.count = 256;
-            passData.srcBuffer = renderGraph.ImportBuffer(_srcBuffer);
-            passData.dstBuffer = renderGraph.ImportBuffer(_dstBuffer);
+            passData.count = COUNT;
+            passData.idxBuffer = renderGraph.ImportBuffer(_idxBuffer);
 
             builder.SetRenderFunc(static (PassData passData, ComputeGraphContext ctx) =>
             {
-                // compute flow
                 var kernelId = passData.shader.FindKernel("CSMain");
-                ctx.cmd.SetComputeIntParam(passData.shader, "Count", passData.count);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "SrcBuffer", passData.srcBuffer);
-                ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "DstBuffer", passData.dstBuffer);
-                ctx.cmd.DispatchCompute(passData.shader, kernelId, 1, 1, 1);
+
+                int nlog = 0;
+                for (int n = passData.count; n > 1; n >>= 1) nlog++;
+
+                for (int i = 0; i < nlog; i++)
+                {
+                    int inc = 1 << i;
+                    for (int j = 0; j < i + 1; j++)
+                    {
+                        ctx.cmd.SetComputeIntParam(passData.shader, "inc", inc);
+                        ctx.cmd.SetComputeIntParam(passData.shader, "dir", 2 << i);
+                        ctx.cmd.SetComputeBufferParam(passData.shader, kernelId, "data", passData.idxBuffer);
+
+                        int threadGroups = (passData.count >> 1) / THREADNUM;
+                        ctx.cmd.DispatchCompute(passData.shader, kernelId, threadGroups, 1, 1);
+
+                        inc >>= 1;
+                    }
+                }
             });
         }
+
+        // DEBUG
+        _visualEffect.SetInt("Count", COUNT);
+        _visualEffect.SetGraphicsBuffer("IdxBuffer", _idxBuffer);
+        _visualEffect.Play();
+
+        _computed = true;
     }
 
     public void Dispose()
     {
-        _srcBuffer.Dispose();
-        _dstBuffer.Dispose();
+        _idxBuffer.Dispose();
     }
 }
